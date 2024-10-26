@@ -24,7 +24,7 @@ const pool = mysql.createPool({
 const JWT_SECRET = process.env.JWT_SECRET;
 console.log('Using JWT_SECRET:', JWT_SECRET);
 
-// Middleware to verify JWT and add user info to request
+// Modified authenticateJWT middleware to handle multiple roles
 const authenticateJWT = (req, res, next) => {
     const authHeader = req.headers.authorization;
 
@@ -58,7 +58,7 @@ async function sendOtpEmail(email, otp) {
             {
                 to: [
                     {
-                        name: "User", // Change this as needed
+                        name: "User",
                         email: email,
                     },
                 ],
@@ -83,7 +83,7 @@ async function sendOtpEmail(email, otp) {
             {
                 headers: {
                     accept: "application/json",
-                    authkey: "103801ASIjpSVep5dadb6b2", // Keep this secure
+                    authkey: "103801ASIjpSVep5dadb6b2",
                     "content-type": "application/json",
                 },
             }
@@ -95,8 +95,6 @@ async function sendOtpEmail(email, otp) {
     }
 }
 
-
-// Endpoint to send OTP
 app.post("/send-otp", async (req, res) => {
     const { email } = req.body;
 
@@ -118,7 +116,9 @@ app.post("/send-otp", async (req, res) => {
     }
 });
 
-// Endpoint to verify OTP
+
+
+// Modified verify-otp endpoint to handle multiple roles
 app.post('/verify-otp', async (req, res) => {
     const { email, otp } = req.body;
 
@@ -129,9 +129,6 @@ app.post('/verify-otp', async (req, res) => {
         );
         const latestOtp = rows[0];
 
-        console.log('Latest OTP record:', latestOtp);
-        console.log('Entered OTP:', otp);
-
         if (!latestOtp) {
             console.log('No OTP found for this email');
             return res.status(400).json({ message: 'No OTP found for this email.' });
@@ -140,33 +137,50 @@ app.post('/verify-otp', async (req, res) => {
         const isOtpValid = latestOtp.otp === otp;
         const isOtpExpired = new Date() >= new Date(latestOtp.expires_at);
 
-        console.log('OTP match:', isOtpValid);
-        console.log('OTP expired:', isOtpExpired);
-
         if (isOtpValid && !isOtpExpired) {
-            console.log('OTP is valid and not expired. Proceeding with login.');
-            const [userRows] = await pool.query('SELECT * FROM users_apar WHERE email = ?', [email]);
-            const userExists = userRows.length > 0;
+            // Check if user exists and get their roles
+            const [userRows] = await pool.query(
+                'SELECT * FROM users_apar WHERE email = ?',
+                [email]
+            );
 
-            if (!userExists) {
-                console.log('User does not exist. Creating new user.');
-                await pool.query('INSERT INTO users_apar (email, role) VALUES (?, ?)', [email, null]);
+            let userRoles;
+            if (userRows.length === 0) {
+                // Create new user with empty roles array
+                await pool.query(
+                    'INSERT INTO users_apar (email, roles) VALUES (?, ?)',
+                    [email, JSON.stringify([])]
+                );
+                userRoles = [];
+            } else {
+                // Log the roles fetched from the database
+                console.log('Fetched roles from DB:', userRows[0].roles);
+                
+                // Check if roles are already an array
+                if (Array.isArray(userRows[0].roles)) {
+                    userRoles = userRows[0].roles; // Use directly if it's an array
+                } else {
+                    // If it's a string, parse it as JSON
+                    userRoles = JSON.parse(userRows[0].roles);
+                }
             }
-
-            // Fetch user role
-            const [roleRows] = await pool.query('SELECT role FROM users_apar WHERE email = ?', [email]);
-            const userRole = roleRows[0].role;
 
             // Delete the used OTP
             await pool.query('DELETE FROM otp WHERE id = ?', [latestOtp.id]);
 
-            // Generate JWT with user role
-            const token = jwt.sign({ email: email, role: userRole }, JWT_SECRET, { expiresIn: '1h' });
+            // Generate JWT with user roles array
+            const token = jwt.sign(
+                { email: email, roles: userRoles },
+                JWT_SECRET,
+                { expiresIn: '1h' }
+            );
 
-            console.log('Sending successful login response with token');
-            return res.status(200).json({ message: 'Login successful!', token: token, role: userRole });
+            return res.status(200).json({
+                message: 'Login successful!',
+                token: token,
+                roles: userRoles
+            });
         } else {
-            console.log('OTP is invalid or expired. Sending error response.');
             return res.status(400).json({ message: 'Invalid or expired OTP.' });
         }
     } catch (err) {
@@ -175,16 +189,13 @@ app.post('/verify-otp', async (req, res) => {
     }
 });
 
-// Create a new dashboard (admin only)
+// Modified dashboard endpoints to handle multiple roles
 app.post('/dashboards', authenticateJWT, async (req, res) => {
     const { title, url, allowedRoles } = req.body;
-    const userRole = req.user.role;
+    const userRoles = req.user.roles;
 
-    console.log('User attempting to create dashboard:', req.user);
-    console.log('Request body:', req.body);
-
-    if (userRole !== 'admin') {
-        console.log(`Access denied. User role is ${userRole}, not admin.`);
+    // Check if user has admin role
+    if (!userRoles.includes('admin')) {
         return res.status(403).json({ message: 'Access denied. Admin role required.' });
     }
 
@@ -193,7 +204,7 @@ app.post('/dashboards', authenticateJWT, async (req, res) => {
             'INSERT INTO dashboards (title, url, allowed_roles) VALUES (?, ?, ?)',
             [title, url, JSON.stringify(allowedRoles)]
         );
-        console.log('Dashboard created successfully:', result);
+        console.log('dashboard created:', error)
         res.status(201).json({ id: result.insertId, title, url, allowedRoles });
     } catch (error) {
         console.error('Error creating dashboard:', error);
@@ -201,21 +212,24 @@ app.post('/dashboards', authenticateJWT, async (req, res) => {
     }
 });
 
-// Get all dashboards (filtered by user role)
+// Get dashboards accessible to user based on their roles
 app.get('/dashboards', authenticateJWT, async (req, res) => {
-    const userRole = req.user.role;
+    const userRoles = req.user.roles;
 
     try {
         let query = 'SELECT * FROM dashboards';
         let params = [];
 
-        // Allow user3 to see all dashboards like admin
-        if (userRole !== 'admin' && userRole !== 'user3') {
-            query += ' WHERE JSON_CONTAINS(allowed_roles, ?)';
-            params.push(JSON.stringify(userRole));
+        if (!userRoles.includes('admin')) {
+            // Check if any of user's roles match with allowed_roles
+            const roleChecks = userRoles.map(role => 
+                `JSON_CONTAINS(allowed_roles, JSON_QUOTE('${role}'))`
+            ).join(' OR ');
+            
+            query += ` WHERE ${roleChecks}`;
         }
 
-        const [rows] = await pool.query(query, params);
+        const [rows] = await pool.query(query);
         res.json(rows);
     } catch (error) {
         console.error('Error fetching dashboards:', error);
@@ -223,15 +237,14 @@ app.get('/dashboards', authenticateJWT, async (req, res) => {
     }
 });
 
-// Update a dashboard (admin only)
 app.put('/dashboards/:id', authenticateJWT, async (req, res) => {
     const { id } = req.params;
     const { title, url, allowedRoles } = req.body;
-    const userRole = req.user.role;
+    const userRoles = req.user.roles;
 
-    // Allow only admin to update dashboards
-    if (userRole !== 'admin') {
-        return res.status(403).json({ message: 'Access denied' });
+    // Check if user has admin role
+    if (!userRoles.includes('admin')) {
+        return res.status(403).json({ message: 'Access denied. Admin role required.' });
     }
 
     try {
@@ -239,61 +252,32 @@ app.put('/dashboards/:id', authenticateJWT, async (req, res) => {
             'UPDATE dashboards SET title = ?, url = ?, allowed_roles = ? WHERE id = ?',
             [title, url, JSON.stringify(allowedRoles), id]
         );
-        res.json({ id, title, url, allowedRoles });
+        res.status(200).json({ message: 'Dashboard updated successfully' });
     } catch (error) {
         console.error('Error updating dashboard:', error);
-        res.status(500).json({ message: 'Error updating dashboard' });
+        res.status(500).json({ message: 'Error updating dashboard', error: error.message });
     }
 });
 
-// Delete a dashboard (admin only)
 app.delete('/dashboards/:id', authenticateJWT, async (req, res) => {
     const { id } = req.params;
-    const userRole = req.user.role;
+    const userRoles = req.user.roles;
 
-    // Allow only admin to delete dashboards
-    if (userRole !== 'admin') {
-        return res.status(403).json({ message: 'Access denied' });
+    // Check if user has admin role
+    if (!userRoles.includes('admin')) {
+        return res.status(403).json({ message: 'Access denied. Admin role required.' });
     }
 
     try {
         await pool.query('DELETE FROM dashboards WHERE id = ?', [id]);
-        res.json({ message: 'Dashboard deleted successfully' });
+        res.status(200).json({ message: 'Dashboard deleted successfully' });
     } catch (error) {
         console.error('Error deleting dashboard:', error);
-        res.status(500).json({ message: 'Error deleting dashboard' });
+        res.status(500).json({ message: 'Error deleting dashboard', error: error.message });
     }
 });
 
-// Verify token endpoint
-app.post('/verify-token', (req, res) => {
-    const token = req.body.token;
-    if (!token) {
-        return res.status(401).json({ message: 'No token provided' });
-    }
 
-    jwt.verify(token, JWT_SECRET, (err, decoded) => {
-        if (err) {
-            return res.status(401).json({ message: 'Invalid token' });
-        }
-        res.json({ valid: true, email: decoded.email, role: decoded.role });
-    });
-});
-
-// Add a new endpoint to check user role
-app.get('/check-role', authenticateJWT, (req, res) => {
-    console.log('User role check:', req.user);
-    res.json({ role: req.user.role });
-});
-
-// Add this new endpoint for logout
-app.post('/logout', authenticateJWT, (req, res) => {
-    // In a more complex system, you might want to invalidate the token here
-    // For now, we'll just send a success response
-    res.json({ message: 'Logout successful' });
-});
-
-// Start the server
 app.listen(5000, () => {
     console.log("Server is running on http://localhost:5000");
 });
