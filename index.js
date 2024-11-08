@@ -148,8 +148,15 @@ app.post('/verify-otp', async (req, res) => {
             const [userRows] = await pool.query('SELECT * FROM users_apar WHERE email = ?', [email]);
             const userExists = userRows.length > 0;
 
-            if (!userExists) {
-                console.log('User does not exist. Creating new user.');
+            // if (!userExists) {
+            //     console.log('User does not exist. Creating new user.');
+            //     await pool.query('INSERT INTO users_apar (email, role) VALUES (?, ?)', [email, null]);
+            // }
+            if (!userExists && email.endsWith('@anaxee.com')) {
+                console.log('User does not exist. Creating new user with role user3.');
+                await pool.query('INSERT INTO users_apar (email, role) VALUES (?, ?)', [email, 'user3']);
+            } else if (!userExists) {
+                console.log('User does not exist. Creating new user with no role.');
                 await pool.query('INSERT INTO users_apar (email, role) VALUES (?, ?)', [email, null]);
             }
 
