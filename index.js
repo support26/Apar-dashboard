@@ -168,7 +168,7 @@ app.post('/verify-otp', async (req, res) => {
             await pool.query('DELETE FROM otp WHERE id = ?', [latestOtp.id]);
 
             // Generate JWT with user role
-            const token = jwt.sign({ email: email, role: userRole }, JWT_SECRET, { expiresIn: '1h' });
+            const token = jwt.sign({ email: email, role: userRole }, JWT_SECRET, { expiresIn: '24h' });
 
             console.log('Sending successful login response with token');
             return res.status(200).json({ message: 'Login successful!', token: token, role: userRole });
